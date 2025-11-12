@@ -1,176 +1,111 @@
-#!/usr/bin/env python3
-"""
-MPS-SSM Project: Main Control Script
-Modified with a dynamic scheduler for maximum GPU utilization.
-"""
+"""Experiment orchestrator for Seq-MPS benchmark suite."""
+from __future__ import annotations
 
-import os
-import sys
-import time
-import yaml
-import json
 import argparse
 import itertools
+import os
 import subprocess
+import time
 from pathlib import Path
-from typing import Dict, List, Any
-import torch.multiprocessing as mp
+from typing import Any, Dict, List
+
+import yaml
+
 
 class ExperimentOrchestrator:
-    """Manages experiment execution and coordination with a dynamic scheduler."""
-    
-    def __init__(self, config_path: str, mode: str, num_gpus: int = 8):
-        self.config = self._load_config(config_path)
-        self.mode = mode
+    def __init__(self, config_path: str, num_gpus: int) -> None:
+        self.config_path = config_path
+        with open(config_path, "r") as f:
+            self.config = yaml.safe_load(f)
+
+        self.exp_cfg = self.config["experiment"]
+        self.datasets = list(self.exp_cfg["datasets"].keys())
+        self.horizons = self.exp_cfg.get("horizons") or self.exp_cfg.get("prediction_lengths")
+        if not self.horizons:
+            raise ValueError("Config must define 'experiment.horizons'.")
         self.num_gpus = num_gpus
         self.results_dir = Path("results")
-        self._setup_directories()
-        
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
-        with open(config_path, 'r') as f: return yaml.safe_load(f)
-            
-    def _setup_directories(self):
-        dirs = [
-            self.results_dir / "lambda_search", self.results_dir / "lambda_search_models",
-            self.results_dir / "final_runs" / "logs", Path("logs")
-        ]
-        for d in dirs: d.mkdir(parents=True, exist_ok=True)
-    
-    # 在 ExperimentOrchestrator 类里添加这个新函数
-    def _find_best_lambda_for_test(self, dataset: str, pred_len: int) -> float:
-        """
-        为给定的数据集和预测长度查找最佳lambda值。
-        """
-        search_dir = self.results_dir / "lambda_search"
-        best_lambda = 0.0  # 如果找不到，默认为0.0
-        best_val_loss = float('inf')
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        # 构造文件匹配模式
-        pattern = f"{dataset}_{pred_len}_*.json"
-        
-        # 遍历所有匹配的lambda搜索结果文件
-        for f in search_dir.glob(pattern):
-            try:
-                with open(f, 'r') as res_file:
-                    data = json.load(res_file)
-                    if data.get('val_loss', float('inf')) < best_val_loss:
-                        best_val_loss = data['val_loss']
-                        best_lambda = data.get('lambda_val', 0.0)
-            except (json.JSONDecodeError, KeyError):
-                # 如果文件损坏或格式不正确，则跳过
-                continue
-                
-        return best_lambda
-    
-    def _generate_experiment_grid(self) -> List[Dict[str, Any]]:
-        datasets = self.config['datasets']
-        pred_lens = self.config['prediction_lengths']
-        
-        if self.mode == 'lambda_search':
-            if 'lambda_search' not in self.config or 'values' not in self.config['lambda_search']:
-                raise ValueError("Lambda values not found in config for lambda_search mode.")
-            lambda_vals = self.config['lambda_search']['values']
-            grid = itertools.product(datasets, pred_lens, lambda_vals)
-            return [{'dataset': d, 'pred_len': p, 'lambda_val': l, 'mode': 'lambda_search'} for d, p, l in grid]
-        else: # test_only
-            experiments = []
-            print("Finding best lambda values for test mode...")
-            grid = itertools.product(datasets, pred_lens)
-            for d, p in grid:
-                # 为每个测试任务查找最佳lambda
-                best_lambda = self._find_best_lambda_for_test(d, p)
-                
-                # 将带有真实lambda值的任务添加到列表中
-                experiments.append({
-                    'dataset': d, 
-                    'pred_len': p, 
-                    'lambda_val': best_lambda,  # 使用找到的最佳lambda
-                    'mode': 'test_only'
-                })
-            print("Finished finding lambda values.")
-            return experiments
-            
-    def _launch_experiment(self, exp_config: Dict[str, Any], gpu_id: int):
+    # ------------------------------------------------------------------
+    def _experiment_grid(self) -> List[Dict[str, Any]]:
+        grid = itertools.product(self.datasets, self.horizons)
+        return [
+            {"dataset": dataset, "pred_len": horizon}
+            for dataset, horizon in grid
+        ]
+
+    def _launch(self, exp: Dict[str, Any], gpu_id: int) -> subprocess.Popen:
         cmd = [
-            sys.executable, "run_experiment.py",
-            "--dataset", exp_config['dataset'], "--pred_len", str(exp_config['pred_len']),
-            "--lambda_val", str(exp_config['lambda_val']), "--mode", exp_config['mode'],
-            "--gpu_id", str(gpu_id), "--config", self.config['config_file']
+            os.environ.get("PYTHON", "python"),
+            "run_experiment.py",
+            "--dataset",
+            exp["dataset"],
+            "--pred_len",
+            str(exp["pred_len"]),
+            "--mode",
+            "train_eval",
+            "--gpu_id",
+            str(gpu_id),
+            "--config",
+            self.config_path,
         ]
         env = os.environ.copy()
-        env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-        
-        try:
-            subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            print(f"--- ERROR on GPU {gpu_id} for experiment: {exp_config} ---")
-            print(f"--- STDERR ---\n{e.stderr}\n--- END OF ERROR ---")
-        
-    def run(self):
-        """Executes all experiments using a dynamic scheduling loop."""
-        experiments = self._generate_experiment_grid()
-        print(f"Total experiments to run: {len(experiments)}")
-        if not experiments: return
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        log_path = self.results_dir / f"dispatch_{exp['dataset']}_H{exp['pred_len']}_gpu{gpu_id}.log"
+        log_file = open(log_path, "w")
+        process = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+        process.log_file = log_file  # type: ignore[attr-defined]
+        return process
 
-        task_queue = list(experiments)
-        # Dictionary to track the process running on each GPU: {gpu_id: Process}
-        active_processes = {}
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        experiments = self._experiment_grid()
+        print(f"Dispatching {len(experiments)} experiments across {self.num_gpus} GPUs")
 
-        print("Starting dynamic scheduler...")
-        while task_queue or active_processes:
-            # Check for finished processes and free up their GPUs
-            finished_gpus = []
-            for gpu_id, process in active_processes.items():
-                if not process.is_alive():
-                    process.join()  # Clean up the completed process
-                    finished_gpus.append(gpu_id)
-            
-            for gpu_id in finished_gpus:
-                del active_processes[gpu_id]
+        active: Dict[int, subprocess.Popen] = {}
+        queue = list(experiments)
 
-            # Launch new tasks on any available GPU
-            while len(active_processes) < self.num_gpus and task_queue:
-                # Find the next available GPU id
-                available_gpu_id = -1
-                for i in range(self.num_gpus):
-                    if i not in active_processes:
-                        available_gpu_id = i
-                        break
-                
-                if available_gpu_id != -1:
-                    exp_config = task_queue.pop(0)
-                    print(f"Dispatching to free GPU {available_gpu_id}: {exp_config['dataset']}, len={exp_config['pred_len']}, lambda={exp_config['lambda_val']}")
-                    p = mp.Process(target=self._launch_experiment, args=(exp_config, available_gpu_id))
-                    p.start()
-                    active_processes[available_gpu_id] = p
-                else:
-                    # This case should not be reached if len(active_processes) < self.num_gpus
-                    break 
+        while queue or active:
+            free_gpus = [gid for gid in range(self.num_gpus) if gid not in active]
+            while free_gpus and queue:
+                gpu_id = free_gpus.pop(0)
+                exp = queue.pop(0)
+                print(f"Launching {exp['dataset']} horizon {exp['pred_len']} on GPU {gpu_id}")
+                proc = self._launch(exp, gpu_id)
+                active[gpu_id] = proc
 
-            # If all GPUs are busy and there are still tasks, wait a bit before checking again.
-            if len(active_processes) == self.num_gpus and task_queue:
-                time.sleep(5) # Polling interval to check for finished jobs
+            finished = []
+            for gpu_id, proc in active.items():
+                retcode = proc.poll()
+                if retcode is not None:
+                    proc.log_file.close()
+                    finished.append(gpu_id)
+                    if retcode != 0:
+                        print(f"Experiment on GPU {gpu_id} failed with code {retcode}")
+            for gpu_id in finished:
+                del active[gpu_id]
 
-            # If no tasks are left in the queue, just wait for the last running jobs to finish.
-            if not task_queue:
-                time.sleep(1)
+            if queue and not free_gpus:
+                time.sleep(5)
+            elif not queue:
+                time.sleep(2)
 
-        print(f"\nAll experiments completed for mode: {self.mode}")
+        print("All experiments finished.")
 
-def main():
-    parser = argparse.ArgumentParser(description="MPS-SSM Experiment Orchestrator")
-    parser.add_argument('--mode', type=str, required=True, choices=['lambda_search', 'test_only'])
-    parser.add_argument('--config', type=str, required=True)
-    parser.add_argument('--num_gpus', type=int, default=8)
-    args = parser.parse_args()
 
-    with open(args.config, 'r') as f: config = yaml.safe_load(f)
-    config['config_file'] = args.config
-    with open(args.config, 'w') as f: yaml.dump(config, f)
-    
-    orchestrator = ExperimentOrchestrator(args.config, args.mode, args.num_gpus)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Seq-MPS experiment orchestrator")
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    orchestrator = ExperimentOrchestrator(args.config, args.num_gpus)
     orchestrator.run()
 
+
 if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
     main()
