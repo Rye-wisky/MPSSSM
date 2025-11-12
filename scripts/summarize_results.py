@@ -49,6 +49,8 @@ def collect_summaries(root: Path) -> List[Dict]:
         summaries.append(row)
     return summaries
 
+        summaries.append(row)
+    return summaries
 
 def build_tables(rows: List[Dict]) -> Dict[str, pd.DataFrame]:
     df = pd.DataFrame(rows)
