@@ -61,12 +61,11 @@ def train_one_epoch(
 
             with torch.no_grad():
                 avg_rate = losses["avg_rate"].item()
-                if dual_state.get("dual_update", True):
-                    dual_state["lambda"] = max(
-                        0.0,
-                        dual_state["lambda"]
-                        + dual_state["dual_step"] * (avg_rate - dual_state["rate_budget"]),
-                    )
+                dual_state["lambda"] = max(
+                    0.0,
+                    dual_state["lambda"]
+                    + dual_state["dual_step"] * (avg_rate - dual_state["rate_budget"]),
+                )
 
             batch_size = batch["inputs"].shape[0]
             num_samples += batch_size

@@ -6,11 +6,10 @@ import os
 import random
 import time
 from contextlib import contextmanager
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-from torch.distributions import StudentT
 
 
 def set_random_seed(seed: int) -> None:
@@ -136,117 +135,6 @@ def gaussian_crps(
     return torch.mean(crps)
 
 
-def student_t_nll(
-    target: torch.Tensor,
-    mean: torch.Tensor,
-    log_scale: torch.Tensor,
-    log_df: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Negative log likelihood for a Student-t distribution."""
-
-    scale = torch.exp(log_scale)
-    df = torch.nn.functional.softplus(log_df) + 2.0
-    diff = (target - mean) / scale
-    log_norm = (
-        torch.lgamma((df + 1.0) / 2.0)
-        - torch.lgamma(df / 2.0)
-        - 0.5 * torch.log(df * math.pi)
-        - log_scale
-    )
-    log_prob = log_norm - ((df + 1.0) / 2.0) * torch.log1p(diff.pow(2) / df)
-    nll = -log_prob
-    if mask is not None:
-        denom = mask.sum().clamp(min=1.0)
-        return torch.sum(nll * mask) / denom
-    return torch.mean(nll)
-
-
-def sample_based_crps(
-    target: torch.Tensor,
-    samples: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Estimate CRPS from Monte Carlo samples."""
-
-    # target: (...)
-    # samples: (..., num_samples)
-    diffs = torch.abs(samples - target.unsqueeze(-1))
-    term1 = diffs.mean(dim=-1)
-    pairwise = torch.abs(samples.unsqueeze(-1) - samples.unsqueeze(-2))
-    term2 = 0.5 * pairwise.mean(dim=(-1, -2))
-    crps = term1 - term2
-    if mask is not None:
-        denom = mask.sum().clamp(min=1.0)
-        return torch.sum(crps * mask) / denom
-    return torch.mean(crps)
-
-
-def student_t_crps(
-    target: torch.Tensor,
-    mean: torch.Tensor,
-    log_scale: torch.Tensor,
-    log_df: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    num_samples: int = 32,
-) -> torch.Tensor:
-    """Approximate CRPS for Student-t via Monte Carlo sampling."""
-
-    scale = torch.exp(log_scale)
-    df = torch.nn.functional.softplus(log_df) + 2.0
-    dist = StudentT(df, loc=mean, scale=scale)
-    samples = dist.rsample(sample_shape=(num_samples,))
-    samples = samples.movedim(0, -1)
-    return sample_based_crps(target, samples, mask=mask)
-
-
-def quantile_pinball_loss(
-    target: torch.Tensor,
-    quantile_preds: torch.Tensor,
-    quantiles: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    reduce: bool = True,
-) -> torch.Tensor:
-    """Compute pinball loss for multiple quantiles."""
-
-    errors = target.unsqueeze(-1) - quantile_preds
-    q = quantiles.view(*([1] * target.dim()), -1)
-    loss = torch.maximum((q - 1.0) * errors, q * errors)
-    leading_dims = tuple(range(loss.dim() - 1))
-    if mask is not None:
-        mask = mask.unsqueeze(-1)
-        denom = mask.sum().clamp(min=1.0)
-        per_quantile = (loss * mask).sum(dim=leading_dims) / denom
-    else:
-        per_quantile = loss.mean(dim=leading_dims)
-    return per_quantile.sum() if reduce else per_quantile
-
-
-def quantile_crps(
-    target: torch.Tensor,
-    quantile_preds: torch.Tensor,
-    quantiles: Iterable[float],
-    mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    levels = torch.as_tensor(list(quantiles), device=target.device, dtype=target.dtype)
-    if levels.ndim != 1:
-        raise ValueError("Quantile levels must form a 1D tensor")
-    if torch.any(levels <= 0) or torch.any(levels >= 1):
-        raise ValueError("Quantile levels must be in (0, 1)")
-
-    extended = torch.cat([
-        torch.tensor([0.0], device=levels.device, dtype=levels.dtype),
-        levels,
-        torch.tensor([1.0], device=levels.device, dtype=levels.dtype),
-    ])
-    weights = 0.5 * (extended[2:] - extended[:-2])
-    if torch.any(weights <= 0):
-        raise ValueError("Quantile levels must be strictly increasing")
-
-    pinball = quantile_pinball_loss(target, quantile_preds, levels, mask=mask, reduce=False)
-    return 2.0 * torch.sum(pinball * weights)
-
-
 def masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     err = (pred - target) ** 2
     if mask is not None:
@@ -271,32 +159,6 @@ def summarise_metrics(metric_list: Dict[str, list]) -> Dict[str, Dict[str, float
         arr = np.array(values, dtype=float)
         summary[key] = {"mean": float(arr.mean()), "std": float(arr.std(ddof=0))}
     return summary
-
-
-def _rankdata(values: torch.Tensor) -> torch.Tensor:
-    flat = values.flatten()
-    order = torch.argsort(flat)
-    ranks = torch.zeros_like(flat, dtype=torch.float32)
-    ranks[order] = torch.arange(1, flat.numel() + 1, dtype=torch.float32, device=flat.device)
-    unique_vals, inverse, counts = torch.unique(flat, return_inverse=True, return_counts=True)
-    for idx, count in enumerate(counts):
-        if count > 1:
-            mask = inverse == idx
-            ranks[mask] = ranks[mask].mean()
-    return ranks.reshape_as(values)
-
-
-def spearmanr(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> float:
-    if x.numel() != y.numel():
-        raise ValueError("Inputs must have the same number of elements for Spearman correlation")
-    rx = _rankdata(x.float())
-    ry = _rankdata(y.float())
-    rx = rx - rx.mean()
-    ry = ry - ry.mean()
-    denom = torch.sqrt((rx.pow(2).sum() + eps) * (ry.pow(2).sum() + eps))
-    if denom.item() == 0:
-        return 0.0
-    return float((rx * ry).sum().item() / denom.item())
 
 
 def seconds_to_ms(value: float) -> float:

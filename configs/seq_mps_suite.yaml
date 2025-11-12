@@ -1,44 +1,6 @@
 experiment:
   seeds: [1, 2, 3]
   horizons: [96, 192, 336, 720]
-  ablations:
-    rate_only:
-      training:
-        recon_weight: 0.0
-    rate_plus_reconstruct:
-      training:
-        recon_weight: 0.1
-    fixed_lambda:
-      training:
-        dual_update: false
-        initial_lambda: 0.05
-    deterministic_encoder:
-      model:
-        encoder:
-          stochastic: false
-          sigma_floor: 1.0e-4
-    zero_prior:
-      model:
-        prior:
-          type: fixed_zero
-    learned_diag_prior:
-      model:
-        prior:
-          type: learned_diag
-    student_t_head:
-      model:
-        head:
-          type: student_t
-          df_init: 6.0
-      training:
-        scoring: nll
-    quantile_head:
-      model:
-        head:
-          type: quantile
-          quantiles: [0.1, 0.5, 0.9]
-      training:
-        scoring: crps
   datasets:
     ETTh1:
       data_path: data/ETT-small
@@ -122,7 +84,6 @@ training:
   grad_clip: 1.0
   scoring: nll
   recon_weight: 0.1
-  dual_update: true
   optimizer:
     name: AdamW
     lr: 2.0e-4
@@ -141,17 +102,6 @@ model:
   max_dt: 1.0
   feedback_delta: 0.2
   feedback_matrix: 0.2
-  encoder:
-    stochastic: true
-    sigma_floor: 1.0e-3
-  prior:
-    type: conditional_linear
-    alpha: 0.5
-  head:
-    type: gaussian
-    variance_floor: 1.0e-5
-  preprocessor:
-    type: identity
 
 evaluation:
   latency:
@@ -173,11 +123,3 @@ robustness:
     missing:
       missing_rate: 0.1
       burst_length: 6
-
-diagnostics:
-  enable: true
-  heatmap_samples: 4
-  save_rate_traces: true
-  pareto_metrics:
-    clean_metric: nll
-    noisy_metric: gaussian

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,7 +24,6 @@ from core.utils import (
     get_model_size_mb,
     measure_latency,
     set_random_seed,
-    spearmanr,
     summarise_metrics,
 )
 from data_provider.data_loader import get_dataloader
@@ -36,18 +34,6 @@ from data_provider.robustness import (
     add_structured_missing,
 )
 from models.mps_ssm import MPSSSM
-
-
-def deep_update(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
-    for key, value in overrides.items():
-        if isinstance(value, dict):
-            node = base.get(key, {})
-            if not isinstance(node, dict):
-                node = {}
-            base[key] = deep_update(node, value)
-        else:
-            base[key] = copy.deepcopy(value)
-    return base
 
 
 @dataclass
@@ -62,31 +48,19 @@ class TrainingResult:
     elapsed: float
     latency_ms: float
     robustness: Dict[str, Dict[str, float]]
-    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 class ExperimentRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         with open(args.config, "r") as f:
-            raw_config = yaml.safe_load(f)
-
-        self.config = copy.deepcopy(raw_config)
-        self.ablation_name = args.ablation
-        self.backbone = args.backbone
-
-        if self.ablation_name:
-            ablations = self.config.get("experiment", {}).get("ablations", {})
-            if self.ablation_name not in ablations:
-                raise KeyError(f"Ablation {self.ablation_name} not found in configuration.")
-            self.config = deep_update(self.config, copy.deepcopy(ablations[self.ablation_name]))
+            self.config = yaml.safe_load(f)
 
         self.exp_cfg = self.config["experiment"]
         self.training_cfg = self.config["training"]
         self.model_cfg = self.config["model"]
         self.eval_cfg = self.config.get("evaluation", {})
         self.robustness_cfg = self.config.get("robustness", {})
-        self.diagnostics_cfg = self.config.get("diagnostics", {})
 
         if args.dataset not in self.exp_cfg["datasets"]:
             raise KeyError(f"Dataset {args.dataset} not found in configuration.")
@@ -96,12 +70,7 @@ class ExperimentRunner:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        backbone_tag = self.backbone or "seq_mps"
-        components = ["results", "benchmarks", backbone_tag]
-        if self.ablation_name:
-            components.append(self.ablation_name)
-        components.extend([args.dataset, f"H{args.pred_len}"])
-        self.result_dir = Path(*components)
+        self.result_dir = Path("results") / "benchmarks" / args.dataset / f"H{args.pred_len}"
         self.result_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir = self.result_dir / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -132,37 +101,20 @@ class ExperimentRunner:
 
     def _create_model(self, device: Optional[torch.device] = None) -> MPSSSM:
         target_device = device or self.device
-        model_cfg = copy.deepcopy(self.model_cfg)
-        if self.backbone == "mps_dlinear":
-            model_cfg.setdefault("preprocessor", {})
-            model_cfg["preprocessor"]["type"] = "dlinear"
-            model_cfg["enable_feedback"] = model_cfg.get("enable_feedback", False)
-        elif self.backbone == "mps_patchtst":
-            model_cfg.setdefault("preprocessor", {})
-            model_cfg["preprocessor"]["type"] = "patch"
-        elif self.backbone == "mps_mamba":
-            model_cfg.setdefault("preprocessor", {})
-            model_cfg["preprocessor"]["type"] = "mamba"
-
         model = MPSSSM(
             enc_in=self.dataset_cfg["enc_in"],
             pred_len=self.args.pred_len,
             seq_len=self.dataset_cfg["seq_len"],
-            d_model=model_cfg.get("d_model", 256),
-            d_state=model_cfg.get("d_state", 64),
-            gate_hidden=model_cfg.get("gate_hidden", 128),
+            d_model=self.model_cfg.get("d_model", 256),
+            d_state=self.model_cfg.get("d_state", 64),
+            gate_hidden=self.model_cfg.get("gate_hidden", 128),
             scoring=self.training_cfg.get("scoring", "nll"),
             recon_weight=self.training_cfg.get("recon_weight", 0.1),
-            min_dt=model_cfg.get("min_dt", 0.001),
-            max_dt=model_cfg.get("max_dt", 1.0),
-            feedback_delta=model_cfg.get("feedback_delta", 0.1),
-            feedback_matrix=model_cfg.get("feedback_matrix", 0.1),
-            dropout=model_cfg.get("dropout", 0.1),
-            encoder_cfg=model_cfg.get("encoder"),
-            prior_cfg=model_cfg.get("prior"),
-            head_cfg=model_cfg.get("head"),
-            enable_feedback=model_cfg.get("enable_feedback", True),
-            preprocessor_cfg=model_cfg.get("preprocessor"),
+            min_dt=self.model_cfg.get("min_dt", 0.001),
+            max_dt=self.model_cfg.get("max_dt", 1.0),
+            feedback_delta=self.model_cfg.get("feedback_delta", 0.1),
+            feedback_matrix=self.model_cfg.get("feedback_matrix", 0.1),
+            dropout=self.model_cfg.get("dropout", 0.1),
         )
         return model.to(target_device)
 
@@ -179,7 +131,6 @@ class ExperimentRunner:
             "lambda": self.training_cfg.get("initial_lambda", 0.0),
             "rate_budget": self.training_cfg.get("rate_budget", 0.05),
             "dual_step": self.training_cfg.get("dual_step", 0.01),
-            "dual_update": self.training_cfg.get("dual_update", True),
         }
 
         checkpoint_path = self.checkpoint_dir / f"seed{seed}.pth"
@@ -231,7 +182,6 @@ class ExperimentRunner:
 
         latency_ms = self._measure_latency(model, test_loader)
         robustness = self._evaluate_robustness(model, test_loader, base_mse=test_metrics["mse"])
-        diagnostics = self._collect_diagnostics(model, test_loader, test_metrics, robustness, seed)
 
         return TrainingResult(
             seed=seed,
@@ -244,7 +194,6 @@ class ExperimentRunner:
             elapsed=float(last_train_stats.get("elapsed", 0.0)),
             latency_ms=float(latency_ms),
             robustness=robustness,
-            diagnostics=diagnostics,
         )
 
     # ------------------------------------------------------------------
@@ -317,89 +266,6 @@ class ExperimentRunner:
             results[name] = evaluate_with_noise(name, fn)
         return results
 
-    def _collect_diagnostics(
-        self,
-        model: MPSSSM,
-        test_loader: DataLoader,
-        test_metrics: Dict[str, float],
-        robustness: Dict[str, Dict[str, float]],
-        seed: int,
-    ) -> Dict[str, Any]:
-        if not self.diagnostics_cfg.get("enable", False):
-            return {}
-
-        heatmap_samples = int(self.diagnostics_cfg.get("heatmap_samples", 0))
-        save_traces = bool(self.diagnostics_cfg.get("save_rate_traces", False))
-
-        avg_rates: List[float] = []
-        rate_heatmaps: List[np.ndarray] = []
-        delta_traces: List[np.ndarray] = []
-        B_traces: List[np.ndarray] = []
-        C_traces: List[np.ndarray] = []
-
-        diag_dir = self.result_dir / "diagnostics"
-        diag_dir.mkdir(parents=True, exist_ok=True)
-
-        model.eval()
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(test_loader):
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                outputs = model(batch)
-                avg_rates.append(outputs["avg_rate_per_sample"].mean().item())
-
-                if batch_idx < heatmap_samples:
-                    rate_heatmaps.append(outputs["rate_per_timestep"][0].detach().cpu().numpy())
-                    delta_traces.append(outputs["delta_traj"][0].detach().cpu().numpy())
-                    B_traces.append(outputs["B_norm_traj"][0].detach().cpu().numpy())
-                    C_traces.append(outputs["C_norm_traj"][0].detach().cpu().numpy())
-
-        diagnostics: Dict[str, Any] = {}
-        if avg_rates:
-            diagnostics["avg_rate"] = float(np.mean(avg_rates))
-
-        if rate_heatmaps:
-            rate_tensor = torch.from_numpy(np.stack(rate_heatmaps))
-            delta_tensor = torch.from_numpy(np.stack(delta_traces))
-            B_tensor = torch.from_numpy(np.stack(B_traces))
-            C_tensor = torch.from_numpy(np.stack(C_traces))
-            diagnostics["spearman"] = {
-                "rate_delta": spearmanr(rate_tensor.flatten(), delta_tensor.flatten()),
-                "rate_B": spearmanr(rate_tensor.flatten(), B_tensor.flatten()),
-                "rate_C": spearmanr(rate_tensor.flatten(), C_tensor.flatten()),
-            }
-            diagnostics["heatmap"] = {
-                "rate": [arr.tolist() for arr in rate_heatmaps],
-                "delta": [arr.tolist() for arr in delta_traces],
-                "B_norm": [arr.tolist() for arr in B_traces],
-                "C_norm": [arr.tolist() for arr in C_traces],
-            }
-            if save_traces:
-                np.savez(
-                    diag_dir / f"seed{seed}_traces.npz",
-                    rate=np.stack(rate_heatmaps),
-                    delta=np.stack(delta_traces),
-                    B=np.stack(B_traces),
-                    C=np.stack(C_traces),
-                )
-
-        pareto_cfg = self.diagnostics_cfg.get("pareto_metrics", {})
-        clean_metric = pareto_cfg.get("clean_metric")
-        noisy_scenario = pareto_cfg.get("noisy_metric")
-        if clean_metric and clean_metric in test_metrics:
-            pareto: Dict[str, Any] = {
-                "clean_metric": clean_metric,
-                "clean_value": float(test_metrics.get(clean_metric, float("nan"))),
-                "avg_rate": diagnostics.get("avg_rate"),
-            }
-            if noisy_scenario and noisy_scenario in robustness:
-                noisy_metrics = robustness[noisy_scenario]
-                pareto["noisy_metric"] = noisy_scenario
-                pareto["noisy_value"] = float(noisy_metrics.get(clean_metric, noisy_metrics.get("mse", float("nan"))))
-                pareto["degradation"] = float(noisy_metrics.get("degradation", float("nan")))
-            diagnostics["pareto"] = pareto
-
-        return diagnostics
-
     # ------------------------------------------------------------------
     def run(self) -> None:
         log_path = self.result_dir / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -435,9 +301,6 @@ class ExperimentRunner:
         peak_mems: List[float] = []
         elapsed_times: List[float] = []
         robustness_lists: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
-        diag_rates: List[float] = []
-        diag_spearman: Dict[str, List[float]] = defaultdict(list)
-        pareto_points: List[Dict[str, Any]] = []
 
         for res in results:
             lambda_values.append(res.final_lambda)
@@ -450,14 +313,6 @@ class ExperimentRunner:
             latencies.append(res.latency_ms)
             peak_mems.append(res.peak_mem)
             elapsed_times.append(res.elapsed)
-            if res.diagnostics:
-                if "avg_rate" in res.diagnostics:
-                    diag_rates.append(res.diagnostics["avg_rate"])
-                if "spearman" in res.diagnostics:
-                    for key, val in res.diagnostics["spearman"].items():
-                        diag_spearman[key].append(val)
-                if "pareto" in res.diagnostics:
-                    pareto_points.append(res.diagnostics["pareto"])
 
         stats_model = self._create_model(device=torch.device("cpu"))
         param_count = count_parameters(stats_model)
@@ -491,21 +346,7 @@ class ExperimentRunner:
                 "training": self.training_cfg,
                 "data": self.dataset_cfg,
             },
-            "ablation": self.ablation_name,
-            "backbone": self.backbone,
         }
-
-        diag_summary: Dict[str, Any] = {}
-        if diag_rates:
-            diag_summary["avg_rate"] = summarise_metrics({"avg_rate": diag_rates}).get("avg_rate", {})
-        if diag_spearman:
-            diag_summary["spearman"] = {
-                key: summarise_metrics({key: values}).get(key, {}) for key, values in diag_spearman.items()
-            }
-        if pareto_points:
-            diag_summary["pareto"] = pareto_points
-        if diag_summary:
-            summary["diagnostics"] = diag_summary
 
         summary_path = self.result_dir / "summary.json"
         with open(summary_path, "w") as f:
@@ -526,7 +367,6 @@ class ExperimentRunner:
                         "throughput": res.throughput,
                         "peak_mem_gb": res.peak_mem,
                         "epoch_time_s": res.elapsed,
-                        "diagnostics": res.diagnostics,
                     },
                     f,
                     indent=2,
@@ -540,8 +380,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", type=str, choices=["train_eval"], default="train_eval")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--ablation", type=str, default=None)
-    parser.add_argument("--backbone", type=str, default="seq_mps")
     return parser.parse_args()
 
 

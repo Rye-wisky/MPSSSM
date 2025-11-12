@@ -20,13 +20,10 @@ def collect_summaries(root: Path) -> List[Dict]:
         metrics = data.get("metrics", {})
         resources = data.get("resources", {})
         robustness = data.get("robustness", {})
-        diagnostics = data.get("diagnostics", {})
 
         row = {
             "dataset": dataset,
             "horizon": horizon,
-            "backbone": data.get("backbone"),
-            "ablation": data.get("ablation"),
             "mse_mean": metrics.get("mse", {}).get("mean"),
             "mse_std": metrics.get("mse", {}).get("std"),
             "mae_mean": metrics.get("mae", {}).get("mean"),
@@ -49,23 +46,11 @@ def collect_summaries(root: Path) -> List[Dict]:
             row[f"robust_{scen}_degradation_mean"] = metrics_dict.get("degradation", {}).get("mean")
             row[f"robust_{scen}_degradation_std"] = metrics_dict.get("degradation", {}).get("std")
 
-        avg_rate_stats = diagnostics.get("avg_rate", {})
-        if avg_rate_stats:
-            row["avg_rate_mean"] = avg_rate_stats.get("mean")
-            row["avg_rate_std"] = avg_rate_stats.get("std")
-
-        spearman_stats = diagnostics.get("spearman", {})
-        for key, stats in spearman_stats.items():
-            row[f"spearman_{key}_mean"] = stats.get("mean")
-            row[f"spearman_{key}_std"] = stats.get("std")
-
-        pareto_points = diagnostics.get("pareto", [])
-        if pareto_points:
-            row["pareto_points"] = json.dumps(pareto_points)
-
         summaries.append(row)
     return summaries
 
+        summaries.append(row)
+    return summaries
 
 def build_tables(rows: List[Dict]) -> Dict[str, pd.DataFrame]:
     df = pd.DataFrame(rows)
@@ -75,8 +60,6 @@ def build_tables(rows: List[Dict]) -> Dict[str, pd.DataFrame]:
     accuracy_cols = [
         "dataset",
         "horizon",
-        "backbone",
-        "ablation",
         "mse_mean",
         "mse_std",
         "mae_mean",
@@ -86,13 +69,11 @@ def build_tables(rows: List[Dict]) -> Dict[str, pd.DataFrame]:
         "crps_mean",
         "crps_std",
     ]
-    accuracy_table = df[accuracy_cols].sort_values(["dataset", "horizon", "backbone", "ablation"])
+    accuracy_table = df[accuracy_cols].sort_values(["dataset", "horizon"])
 
     resource_cols = [
         "dataset",
         "horizon",
-        "backbone",
-        "ablation",
         "throughput_mean",
         "throughput_std",
         "latency_mean",
@@ -100,23 +81,15 @@ def build_tables(rows: List[Dict]) -> Dict[str, pd.DataFrame]:
         "peak_mem_mean",
         "peak_mem_std",
     ]
-    resource_table = df[resource_cols].sort_values(["dataset", "horizon", "backbone", "ablation"])
+    resource_table = df[resource_cols].sort_values(["dataset", "horizon"])
 
     robustness_cols = [col for col in df.columns if col.startswith("robust_")]
-    robustness_table = df[["dataset", "horizon", "backbone", "ablation", *robustness_cols]].sort_values(
-        ["dataset", "horizon", "backbone", "ablation"]
-    )
-
-    diag_cols = [col for col in df.columns if col.startswith("avg_rate") or col.startswith("spearman_") or col == "pareto_points"]
-    diagnostics_table = df[["dataset", "horizon", "backbone", "ablation", *diag_cols]].sort_values(
-        ["dataset", "horizon", "backbone", "ablation"]
-    )
+    robustness_table = df[["dataset", "horizon", *robustness_cols]].sort_values(["dataset", "horizon"])
 
     return {
         "accuracy": accuracy_table,
         "resources": resource_table,
         "robustness": robustness_table,
-        "diagnostics": diagnostics_table,
     }
 
 
