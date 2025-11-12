@@ -1,0 +1,126 @@
+experiment:
+  seeds: [1, 2, 3]
+  horizons: [96, 192, 336, 720]
+  datasets:
+    ETTh1:
+      data_path: data/ETT-small
+      dataset_type: ETT
+      seq_len: 336
+      enc_in: 7
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+    ETTh2:
+      data_path: data/ETT-small
+      dataset_type: ETT
+      seq_len: 336
+      enc_in: 7
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+    ETTm1:
+      data_path: data/ETT-small
+      dataset_type: ETT
+      seq_len: 336
+      enc_in: 7
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+    ETTm2:
+      data_path: data/ETT-small
+      dataset_type: ETT
+      seq_len: 336
+      enc_in: 7
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+    weather:
+      data_path: data/weather
+      dataset_type: weather
+      seq_len: 336
+      enc_in: 21
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+    electricity:
+      data_path: data/electricity
+      dataset_type: electricity
+      seq_len: 336
+      enc_in: 321
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: true
+      detrend_window: 168
+      num_workers: 4
+    traffic:
+      data_path: data/traffic
+      dataset_type: traffic
+      seq_len: 336
+      enc_in: 862
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: true
+      detrend_window: 168
+      num_workers: 4
+    exchange:
+      data_path: data/exchange
+      dataset_type: exchange
+      seq_len: 336
+      enc_in: 8
+      split: {train: 0.6, val: 0.2, test: 0.2}
+      missing: {forward_fill: true, back_fill: true, indicator: true}
+      detrend: false
+      num_workers: 4
+
+training:
+  batch_size: 32
+  max_epochs: 50
+  patience: 5
+  grad_clip: 1.0
+  scoring: nll
+  recon_weight: 0.1
+  optimizer:
+    name: AdamW
+    lr: 2.0e-4
+    weight_decay: 1.0e-2
+  rate_budget: 0.05
+  dual_step: 1.0e-2
+  initial_lambda: 0.0
+  early_stop_delta: 0.0
+
+model:
+  d_model: 256
+  d_state: 64
+  gate_hidden: 128
+  dropout: 0.1
+  min_dt: 0.001
+  max_dt: 1.0
+  feedback_delta: 0.2
+  feedback_matrix: 0.2
+  spectral_radius: 0.999
+
+evaluation:
+  latency:
+    warmup: 5
+    repetitions: 30
+
+robustness:
+  evaluate: true
+  scenarios:
+    gaussian:
+      noise_level: 0.1
+    impulse:
+      probability: 0.01
+      magnitude_factor: 3.0
+    spurious:
+      frequency: 0.1
+      amplitude_factor: 0.5
+      correlation_strength: 0.7
+    missing:
+      missing_rate: 0.1
+      burst_length: 6
