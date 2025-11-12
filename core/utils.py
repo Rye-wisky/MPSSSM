@@ -68,6 +68,7 @@ def save_model(model: torch.nn.Module, path: str) -> None:
         "feedback_delta": getattr(getattr(model, "feedback_cfg", None), "delta_strength", None),
         "feedback_matrix": getattr(getattr(model, "feedback_cfg", None), "matrix_strength", None),
         "dropout": getattr(model, "dropout", None),
+        "spectral_radius": getattr(model, "spectral_radius", None),
     }
 
     torch.save({

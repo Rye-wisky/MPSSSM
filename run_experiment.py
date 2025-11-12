@@ -115,6 +115,7 @@ class ExperimentRunner:
             feedback_delta=self.model_cfg.get("feedback_delta", 0.1),
             feedback_matrix=self.model_cfg.get("feedback_matrix", 0.1),
             dropout=self.model_cfg.get("dropout", 0.1),
+            spectral_radius=self.model_cfg.get("spectral_radius", 0.999),
         )
         return model.to(target_device)
 

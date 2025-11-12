@@ -102,6 +102,7 @@ model:
   max_dt: 1.0
   feedback_delta: 0.2
   feedback_matrix: 0.2
+  spectral_radius: 0.999
 
 evaluation:
   latency:

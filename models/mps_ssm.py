@@ -88,6 +88,27 @@ def van_loan_discretization(
     return A_bar, B_bar
 
 
+def project_spectral_radius(A_bar: Tensor, max_radius: float) -> Tensor:
+    """Project matrices onto a spectral-norm ball to ensure stability.
+
+    Parameters
+    ----------
+    A_bar: Tensor
+        Batched discrete transition matrices of shape ``(batch, d_state, d_state)``.
+    max_radius: float
+        Target upper bound for the spectral norm. Values ``>= 1`` leave the input
+        unchanged. A small epsilon is added for numerical stability.
+    """
+
+    if max_radius >= 1.0:
+        return A_bar
+
+    spectral_norm = torch.linalg.matrix_norm(A_bar, ord=2)
+    scale = max_radius / (spectral_norm + 1e-12)
+    scale = torch.clamp(scale, max=1.0)
+    return A_bar * scale.view(-1, 1, 1)
+
+
 class SelectiveGate(nn.Module):
     """Input-dependent generator for selective SSM parameters."""
 
@@ -200,6 +221,7 @@ class MPSSSM(nn.Module):
         feedback_delta: float = 0.2,
         feedback_matrix: float = 0.2,
         dropout: float = 0.1,
+        spectral_radius: float = 0.999,
     ) -> None:
         super().__init__()
 
@@ -217,6 +239,7 @@ class MPSSSM(nn.Module):
         self.min_dt = min_dt
         self.max_dt = max_dt
         self.dropout = dropout
+        self.spectral_radius = spectral_radius
         self.feedback_cfg = GateFeedbackConfig(feedback_delta, feedback_matrix)
 
         self.input_embed = nn.Linear(enc_in, d_model)
@@ -298,6 +321,7 @@ class MPSSSM(nn.Module):
             delta, B, C = self.gate(hidden_t, rate_feedback=rate_detached)
 
             A_bar, B_bar = van_loan_discretization(A, B, delta)
+            A_bar = project_spectral_radius(A_bar, self.spectral_radius)
             input_contrib = torch.bmm(B_bar, hidden_t.unsqueeze(-1)).squeeze(-1)
             state_prev = torch.bmm(A_bar, state_sample.unsqueeze(-1)).squeeze(-1) + input_contrib
 
@@ -312,7 +336,7 @@ class MPSSSM(nn.Module):
         final_state = latent_seq[:, -1, :]
 
         pred_params = self.pred_head(final_state)
-        pred_params = pred_params.view(batch, self.pred_len, self.enc_in, 2)
+        pred_params = pred_params.view(batch_size, self.pred_len, self.enc_in, 2)
         pred_mean = pred_params[..., 0]
         pred_logvar = pred_params[..., 1].clamp(min=-10.0, max=5.0)
 
